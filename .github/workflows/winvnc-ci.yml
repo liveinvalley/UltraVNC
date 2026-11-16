@@ -69,6 +69,8 @@ jobs:
       - name: Build winvnc (Release|x64)
         shell: pwsh
         run: |
+          # The pre-link step compiles buildtime.cpp into ..\x64\Release\, which a solution build creates
+          New-Item -ItemType Directory -Force winvnc\x64\Release | Out-Null
           msbuild winvnc\winvnc\winvnc.vcxproj /m /nologo /v:minimal `
             /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET `
             /p:VcpkgRoot="$env:VCPKG_ROOT\"
