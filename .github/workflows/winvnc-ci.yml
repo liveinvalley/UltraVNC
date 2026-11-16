@@ -17,10 +17,24 @@ jobs:
     env:
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
     steps:
-      # winvnc.rc embeds the noVNC files (3rdparty/noVNC submodule)
       - uses: actions/checkout@v4
-        with:
-          submodules: true
+
+      # winvnc.rc embeds the noVNC files (3rdparty/noVNC submodule). The commit pinned in 1.8.3.0 (b493d9b) is not
+      # public, so fall back to the previous pin (7c36fab), which only lacks the web viewer's monitor selection
+      - name: Fetch noVNC
+        shell: bash
+        run: |
+          pin=$(git ls-tree HEAD 3rdparty/noVNC | awk '{print $3}')
+          rm -rf 3rdparty/noVNC
+          git clone --quiet https://github.com/novnc/noVNC.git 3rdparty/noVNC
+          cd 3rdparty/noVNC
+          if git cat-file -e "$pin^{commit}" 2>/dev/null; then
+            git checkout --quiet "$pin"
+          else
+            echo "::warning::noVNC $pin is not public; using 7c36fab (previous pin)"
+            git checkout --quiet 7c36fabe599e053c5a81e98e091ac636f6c1e174
+          fi
+          git log -1 --format='noVNC: %H %s'
 
       - uses: actions/cache@v4
         with:
