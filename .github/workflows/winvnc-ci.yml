@@ -1,0 +1,74 @@
+# Builds winvnc.exe (UltraVNC Server, Release|x64 = the configuration the official x64 installer ships)
+# from this branch and uploads it with its SHA-256. Not signed.
+name: winvnc-ci
+
+on:
+  push:
+    branches: [fix/cursor-shape-per-client]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**') }}
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git clone --quiet https://github.com/microsoft/vcpkg.git $root
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          & "$root\vcpkg.exe" integrate install
+          New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+
+      # The project asks for v142 (VS 2019). Use it when the runner has it, else v143 (VS 2022)
+      - name: Pick toolset
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $v142 = Get-ChildItem "$vs\MSBuild\Microsoft\VC" -Recurse -Directory -Filter v142 -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*PlatformToolsets*' }
+          $toolset = if ($v142) { 'v142' } else { 'v143' }
+          "Toolset: $toolset"
+          "TOOLSET=$toolset" >> $env:GITHUB_ENV
+
+      - name: Build winvnc (Release|x64)
+        shell: pwsh
+        run: |
+          msbuild winvnc\winvnc\winvnc.vcxproj /m /nologo /v:minimal `
+            /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET `
+            /p:VcpkgRoot="$env:VCPKG_ROOT\"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter winvnc.exe -Path winvnc\winvnc | Where-Object { $_.FullName -like '*x64\Release*' } | Select-Object -First 1
+          if (-not $exe) { throw 'winvnc.exe not found' }
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item $exe.FullName out\winvnc.exe
+          $hash = (Get-FileHash out\winvnc.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  winvnc.exe" | Set-Content out\SHA256SUMS -Encoding ascii
+          "commit: $env:GITHUB_SHA`ntoolset: $env:TOOLSET" | Set-Content out\BUILDINFO.txt -Encoding ascii
+          Get-Content out\SHA256SUMS, out\BUILDINFO.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winvnc-x64-${{ github.sha }}
+          path: out/
+          if-no-files-found: error
