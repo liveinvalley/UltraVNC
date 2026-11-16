@@ -36,14 +36,16 @@ jobs:
           New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
           "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
 
-      # The project asks for v142 (VS 2019). Use it when the runner has it, else v143 (VS 2022)
+      # The project asks for v142 (VS 2019). Use it when the runner has it with ATL (winvnc needs atlbase.h),
+      # else v143 (VS 2022)
       - name: Pick toolset
         shell: pwsh
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           $v142 = Get-ChildItem "$vs\MSBuild\Microsoft\VC" -Recurse -Directory -Filter v142 -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -like '*PlatformToolsets*' }
-          $toolset = if ($v142) { 'v142' } else { 'v143' }
+          $atl142 = Get-ChildItem "$vs\VC\Tools\MSVC\14.2*\atlmfc\include\atlbase.h" -ErrorAction SilentlyContinue
+          $toolset = if ($v142 -and $atl142) { 'v142' } else { 'v143' }
           "Toolset: $toolset"
           "TOOLSET=$toolset" >> $env:GITHUB_ENV
 
