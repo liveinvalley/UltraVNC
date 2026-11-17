@@ -1,0 +1,95 @@
+# Builds winvnc.exe (UltraVNC Server, Release|x64 = the configuration the official x64 installer ships)
+# from this branch and uploads it with its SHA-256. Not signed.
+name: winvnc-ci
+
+on:
+  push:
+    branches: [fix/cursor-shape-per-client, ci/upstream-main-cursorfix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+    steps:
+      - uses: actions/checkout@v4
+
+      # winvnc.rc embeds the noVNC files (3rdparty/noVNC submodule). The commit pinned in 1.8.3.0 (b493d9b) is not
+      # public, so fall back to the previous pin (7c36fab), which only lacks the web viewer's monitor selection
+      - name: Fetch noVNC
+        shell: bash
+        run: |
+          pin=$(git ls-tree HEAD 3rdparty/noVNC | awk '{print $3}')
+          rm -rf 3rdparty/noVNC
+          git clone --quiet https://github.com/novnc/noVNC.git 3rdparty/noVNC
+          cd 3rdparty/noVNC
+          if git cat-file -e "$pin^{commit}" 2>/dev/null; then
+            git checkout --quiet "$pin"
+          else
+            echo "::warning::noVNC $pin is not public; using 7c36fab (previous pin)"
+            git checkout --quiet 7c36fabe599e053c5a81e98e091ac636f6c1e174
+          fi
+          git log -1 --format='noVNC: %H %s'
+
+      - uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**') }}
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git clone --quiet https://github.com/microsoft/vcpkg.git $root
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          & "$root\vcpkg.exe" integrate install
+          New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+
+      # The project asks for v142 (VS 2019). Use it when the runner has it with ATL (winvnc needs atlbase.h),
+      # else v143 (VS 2022)
+      - name: Pick toolset
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $v142 = Get-ChildItem "$vs\MSBuild\Microsoft\VC" -Recurse -Directory -Filter v142 -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*PlatformToolsets*' }
+          $atl142 = Get-ChildItem "$vs\VC\Tools\MSVC\14.2*\atlmfc\include\atlbase.h" -ErrorAction SilentlyContinue
+          $toolset = if ($v142 -and $atl142) { 'v142' } else { 'v143' }
+          "Toolset: $toolset"
+          "TOOLSET=$toolset" >> $env:GITHUB_ENV
+
+      - name: Build winvnc (Release|x64)
+        shell: pwsh
+        run: |
+          # The pre-link step compiles buildtime.cpp into ..\x64\Release\, which a solution build creates
+          New-Item -ItemType Directory -Force winvnc\x64\Release | Out-Null
+          msbuild winvnc\winvnc\winvnc.vcxproj /m /nologo /v:minimal `
+            /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET `
+            /p:VcpkgRoot="$env:VCPKG_ROOT\"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter winvnc.exe -Path winvnc\winvnc | Where-Object { $_.FullName -like '*x64\Release*' } | Select-Object -First 1
+          if (-not $exe) { throw 'winvnc.exe not found' }
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item $exe.FullName out\winvnc.exe
+          $hash = (Get-FileHash out\winvnc.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  winvnc.exe" | Set-Content out\SHA256SUMS -Encoding ascii
+          "commit: $env:GITHUB_SHA`ntoolset: $env:TOOLSET" | Set-Content out\BUILDINFO.txt -Encoding ascii
+          Get-Content out\SHA256SUMS, out\BUILDINFO.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winvnc-x64-${{ github.sha }}
+          path: out/
+          if-no-files-found: error
